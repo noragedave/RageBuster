@@ -70,7 +70,7 @@ local function Build()
     end
 end
 
--- returns the blocked word that matched, or nil
+-- returns the text that matched and the list entry it matched, or nil
 local function FindBlockedWord(text)
     local padded = " " .. text .. " "
 
@@ -79,25 +79,25 @@ local function FindBlockedWord(text)
     end
 
     for tok in padded:gmatch("%S+") do
-        if singles[tok] then return tok end
-        if tok:sub(-1) == "s" and singles[tok:sub(1, -2)] then return tok end
+        if singles[tok] then return tok, tok end
+        if tok:sub(-1) == "s" and singles[tok:sub(1, -2)] then return tok, tok:sub(1, -2) end
     end
 
     for _, ph in ipairs(phrases) do
         if padded:find(ph.a, 1, true) or padded:find(ph.b, 1, true) then
-            return ph.word
+            return ph.word, ph.word
         end
     end
 end
 
--- returns the blocked word that matched, or nil
+-- returns the blocked word that matched and the list entry it came from, or nil
 function ns.MatchBlocked(msg)
     if not built then Build() end
 
     local stripped = StripEscapes(msg)
 
-    local hit = FindBlockedWord(JoinSpelledOut(Clean(stripped)))
-    if hit then return hit end
+    local hit, entry = FindBlockedWord(JoinSpelledOut(Clean(stripped)))
+    if hit then return hit, entry end
 
     -- second pass with leetspeak undone ("tr4mp", "b1den", "$imp")
     local low = stripped:lower()
@@ -105,6 +105,16 @@ function ns.MatchBlocked(msg)
         local deleeted = low:gsub("[@$013457]", LEET)
         return FindBlockedWord(JoinSpelledOut(Clean(deleeted)))
     end
+end
+
+-- true when a matched list entry is one of the slurs that ignore a player
+-- immediately, without waiting for review (POLICY.md, "Auto adding")
+function ns.IsAutoIgnore(entry)
+    if not ns.autoIgnoreSet then
+        ns.autoIgnoreSet = {}
+        for _, w in ipairs(ns.autoIgnoreWords or {}) do ns.autoIgnoreSet[Clean(w)] = true end
+    end
+    return entry ~= nil and ns.autoIgnoreSet[entry] == true
 end
 
 -- plain text for the log: links reduced to their visible name, colours removed

@@ -7,6 +7,8 @@ description: Builds a local test package of the RageBuster WoW add-on with the s
 
 `tools/package.py` runs BigWigs packager (pinned in the script) with the repo's `.pkgmeta` and the `-S` flag, the same way `.github/workflows/build.yml` does for a GitHub release. A local test build therefore contains exactly what a release would. The script doesn't upload anything. Git Bash has no `zip`, so the script zips the result in Python.
 
+**Test builds and releases differ in one way: debug.** Code between `--@alpha@` and `--@end-alpha@` in the Lua files is active in untagged builds, which is every test build this skill makes. The packager comments it out when building a tagged release. `/rbust debug`, which prints the hidden messages, lives in those blocks, so it works in test builds and doesn't exist in published releases. Any new debug-only code belongs in such a block. If the user asks why debug is missing from a release, this is why.
+
 The build comes from the **working tree**, so uncommitted edits are included. That's the point of a test build. The version is the latest git tag, or the short commit hash when there are no tags. The hash doesn't change for uncommitted edits, so mention it when the tree is dirty, so the user isn't misled by a version they've seen before.
 
 ## Pick the command
@@ -35,7 +37,7 @@ Installing replaces the add-on's files but deliberately keeps the existing `Verd
 ## Before installing
 
 - Run `git -C <repo> status --short`. If there are uncommitted changes, note which add-on files they touch, since those are what's being tested.
-- If WoW is running (`tasklist /FI "IMAGENAME eq Wow.exe"`, or `WowClassic.exe`), installing still works. Tell the user what reloads what: `/reload` picks up Lua changes, while a change to `RageBuster.toc` (a new file, the Interface line, SavedVariables) needs a full game restart.
+- If WoW is running (`tasklist /FI "IMAGENAME eq Wow*"`; each client has its own name, such as `Wow.exe`, `WowClassic.exe` or `WowB.exe` for the beta), installing still works. Tell the user what reloads what: `/reload` picks up Lua changes, while a change to `RageBuster.toc` (a new file, the Interface line, SavedVariables) needs a full game restart.
 
 ## Check the result
 

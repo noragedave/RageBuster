@@ -1,16 +1,64 @@
 local addonName, ns = ...
 
-ns.debug = false   -- toggle in game with: /ragebuster debug
+-- Debug output shows the hidden messages themselves, so it only exists in
+-- development and test builds: the packager comments out every "alpha" block
+-- (marked below) in tagged, published releases.
+ns.debug = false   -- toggle in game with: /ragebuster debug (test builds only)
 
 local PREFIX = "|cffff8800[RageBuster]|r "
 local MAX_LOG = 1000        -- oldest entries are dropped past this
-local CONTEXT_LINES = 4     -- preceding lines kept with each hit for the reviewer
+local CONTEXT_LINES = 25    -- lines before each hit, kept for the reviewer
+local AFTER_LINES = 15      -- replies after each hit, so the reviewer sees the reaction
+local AFTER_SECONDS = 300   -- stop waiting for replies after this long
+local PLAYER_LINES = 20     -- the author's own recent messages kept with each hit
+local PLAYER_FORGET = 1800  -- forget players silent this long, once many are tracked
+local PLAYER_MAX = 500
 local MAX_NATIVE = 50       -- Blizzard's per-character ignore list cap
 
 local db, charDB
 
+---------------------------------------------------------------------
+-- Output: our own chat tab if there is one (/rbust window), else main chat
+---------------------------------------------------------------------
+local WINDOW_NAME = "RageBuster"
+
+local function FindWindow()
+    for i = 1, (NUM_CHAT_WINDOWS or 10) do
+        local name, _, _, _, _, _, shown, _, docked = GetChatWindowInfo(i)
+        -- a closed tab keeps its name, so also require it to be shown or docked
+        if name == WINDOW_NAME and (shown or docked) and _G["ChatFrame" .. i] then
+            return _G["ChatFrame" .. i]
+        end
+    end
+end
+
+local function Out(text)
+    local frame = FindWindow()
+    if frame then
+        frame:AddMessage(text)
+    else
+        print(text)
+    end
+end
+
 local function Print(...)
-    print(PREFIX .. string.format(...))
+    Out(PREFIX .. string.format(...))
+end
+
+-- Opens a "RageBuster" chat tab that shows only this add-on's output.
+local function OpenWindow()
+    local frame = FindWindow()
+    if not frame and FCF_OpenNewWindow then
+        FCF_OpenNewWindow(WINDOW_NAME)
+        frame = FindWindow()
+    end
+    if not frame then
+        return print(PREFIX .. "couldn't open a chat tab (the client allows 10). Close one and try again.")
+    end
+    -- keep regular chat out of it, so it holds only RageBuster lines
+    if ChatFrame_RemoveAllMessageGroups then ChatFrame_RemoveAllMessageGroups(frame) end
+    if ChatFrame_RemoveAllChannels then ChatFrame_RemoveAllChannels(frame) end
+    Print("this tab now shows RageBuster's output. Close it to send output back to the main chat.")
 end
 
 ---------------------------------------------------------------------
@@ -80,7 +128,55 @@ end
 ---------------------------------------------------------------------
 -- Logging
 ---------------------------------------------------------------------
-local recent = {}   -- [channel key] = { "Author: text", ... }
+-- Whether a line is a joke or bait often shows only in the conversation around
+-- it, so each hit keeps the lines before it and the replies that came after.
+local recent = {}      -- [channel key] = last CONTEXT_LINES lines, "Author: text"
+local following = {}   -- [channel key] = log entries still collecting replies
+-- Each player's own recent public messages, caught or not, across channels, so
+-- the reviewer can tell a one-off line from a pattern.
+local spoken, spokenCount = {}, 0   -- [name] = { seen = time, lines = { "[Trade] text", ... } }
+
+local function RememberPlayer(name, channel, text)
+    local p = spoken[name]
+    if not p then
+        if spokenCount >= PLAYER_MAX then
+            local cutoff = time() - PLAYER_FORGET
+            for n, q in pairs(spoken) do
+                if q.seen < cutoff then spoken[n] = nil; spokenCount = spokenCount - 1 end
+            end
+            if spokenCount >= PLAYER_MAX then spoken, spokenCount = {}, 0 end
+        end
+        p = { lines = {} }
+        spoken[name] = p
+        spokenCount = spokenCount + 1
+    end
+    p.seen = time()
+    p.lines[#p.lines + 1] = "[" .. channel .. "] " .. text
+    if #p.lines > PLAYER_LINES then table.remove(p.lines, 1) end
+end
+
+-- One line of conversation as the reviewer sees it. Your own lines read "(me)"
+-- so your character names don't end up in the uploaded log.
+local function Line(name, text)
+    -- full Name-Realm, so the review can tell same-named players on different realms apart
+    local speaker = (name == MyName()) and "(me)" or name
+    return speaker .. ": " .. text
+end
+
+-- Adds this line to every earlier hit in the channel that is still waiting
+-- for replies; a hit stops collecting after AFTER_LINES lines or AFTER_SECONDS.
+local function AddReply(key, line)
+    local waiting = following[key]
+    if not waiting then return end
+    local now, still = time(), {}
+    for _, entry in ipairs(waiting) do
+        if now - entry.time <= AFTER_SECONDS then
+            entry.after[#entry.after + 1] = line
+            if #entry.after < AFTER_LINES then still[#still + 1] = entry end
+        end
+    end
+    following[key] = (#still > 0) and still or nil
+end
 
 local function NewId()
     db.seq = db.seq + 1
@@ -91,9 +187,10 @@ end
 local function LogHit(event, name, text, word, channel, guid, key)
     local context = {}
     for i, line in ipairs(recent[key] or {}) do context[i] = line end
+    local earlier = {}   -- this player's own messages before this one
+    for i, line in ipairs(spoken[name] and spoken[name].lines or {}) do earlier[i] = line end
 
-    local log = db.log
-    log[#log + 1] = {
+    local entry = {
         id = NewId(),
         time = time(),
         author = name,
@@ -102,18 +199,25 @@ local function LogHit(event, name, text, word, channel, guid, key)
         word = word,
         msg = text,
         context = context,
+        after = {},   -- filled in by AddReply as the conversation goes on
+        recent = earlier,
         by = MyName(),
     }
+    local log = db.log
+    log[#log + 1] = entry
     while #log > MAX_LOG do table.remove(log, 1) end
+
+    following[key] = following[key] or {}
+    table.insert(following[key], entry)
 end
 
-local function Remember(key, name, text)
+local function Remember(key, line)
     local lines = recent[key]
     if not lines then
         lines = {}
         recent[key] = lines
     end
-    lines[#lines + 1] = Ambiguate(name, "none") .. ": " .. text
+    lines[#lines + 1] = line
     if #lines > CONTEXT_LINES then table.remove(lines, 1) end
 end
 
@@ -131,19 +235,26 @@ local function Process(event, msg, author, ...)
     local key = event .. (channelIndex or "")
     local text = ns.PlainText(msg)
     local hit = ns.MatchBlocked(msg)
+    local line = Line(name, text)
+    local channel = (channelString and channelString ~= "") and channelString or event:gsub("^CHAT_MSG_", "")
+
+    -- every line, caught or not, is a possible reply to an earlier hit
+    AddReply(key, line)
 
     if hit then
-        if ns.debug then
-            Print("blocked on '%s': %s", hit, msg)
+        --@alpha@
+        if ns.debug and ns.DebugShow then
+            ns.DebugShow(name, channel, text, hit)
         end
+        --@end-alpha@
         if db.logging and name ~= MyName() then
-            local channel = (channelString and channelString ~= "") and channelString or event:gsub("^CHAT_MSG_", "")
             if issecretvalue and guid and issecretvalue(guid) then guid = nil end
             LogHit(event, name, text, hit, channel, guid, key)
         end
     end
 
-    Remember(key, name, text)
+    Remember(key, line)
+    if name ~= MyName() then RememberPlayer(name, channel, text) end
     return hit ~= nil
 end
 
@@ -263,10 +374,258 @@ function commands.status()
         db.logging and "ON" or "OFF", #db.log, CountKeys(db.ignored))
 end
 
-function commands.debug()
-    ns.debug = not ns.debug
-    Print("debug %s", ns.debug and "ON" or "OFF")
+--@alpha@
+---------------------------------------------------------------------
+-- Debug window (test builds only): every hidden message as it happens,
+-- each with a Block button that ignores the player as your own decision.
+-- The window can be moved, and resized from its bottom-right corner.
+---------------------------------------------------------------------
+local MAX_ROWS = 300    -- oldest rows are reused past this
+local debugFrame, scroll, content
+local rows = {}         -- oldest first: { frame, button, text, author }
+
+local function Bars(s)   -- "|" starts a WoW escape code, so double it in shown text
+    return (tostring(s or ""):gsub("|", "||"))
 end
+
+local function FitButton(b)
+    local fs = b.GetFontString and b:GetFontString()
+    b:SetWidth(((fs and fs:GetStringWidth()) or 30) + 18)
+end
+
+local function SetBlocked(row)
+    if db.ignored[row.author] then
+        row.button:SetText("Blocked")
+        row.button:Disable()
+    else
+        row.button:SetText("Block")
+        row.button:Enable()
+    end
+    FitButton(row.button)
+end
+
+-- stacks the rows top to bottom; the message text wraps to the window's width
+local function Layout()
+    if not content then return end
+    local width = math.max(scroll:GetWidth() or 0, 120)
+    content:SetWidth(width)
+    local y = 0
+    for i, row in ipairs(rows) do
+        if i % 2 == 0 then row.stripe:Show() else row.stripe:Hide() end
+        row.text:SetWidth(width - row.button:GetWidth() - 10)   -- message on the left, Block on the right
+        local h = math.max((row.text:GetStringHeight() or 0) + 6, 24)
+        row.frame:ClearAllPoints()
+        row.frame:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
+        row.frame:SetSize(width, h)
+        y = y + h
+    end
+    content:SetHeight(math.max(y, 1))
+end
+
+local function ScrollToEnd()
+    if scroll and scroll.GetVerticalScrollRange then
+        scroll:SetVerticalScroll(scroll:GetVerticalScrollRange())
+    end
+end
+
+-- Adding an entry is the standard way to define a popup; never reassign the table itself.
+local confirmIgnore = {
+    text = "Block %s?\n\nThey go on your ignore list, recorded as your own decision.",
+    button1 = YES or "Yes",
+    button2 = NO or "No",
+    OnAccept = function(_, name)
+        commands.ignore(name)
+        for _, row in ipairs(rows) do
+            if row.author == name then SetBlocked(row) end
+        end
+        Layout()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+if StaticPopupDialogs then StaticPopupDialogs["RAGEBUSTER_CONFIRM_IGNORE"] = confirmIgnore end
+
+local function AskIgnore(name)
+    if db.ignored[name] then return Print("%s is already ignored.", name) end
+    if StaticPopup_Show and StaticPopupDialogs then
+        StaticPopup_Show("RAGEBUSTER_CONFIRM_IGNORE", name, nil, name)
+    else
+        Print("to ignore %s, type /rbust ignore %s", name, name)
+    end
+end
+
+-- Clients differ in which frame templates they have, so try the modern ones first.
+local function CreateWithTemplate(kind, name, parent, templates)
+    for _, template in ipairs(templates) do
+        local ok, frame = pcall(CreateFrame, kind, name, parent, template)
+        if ok and frame then return frame, template end
+    end
+    return CreateFrame(kind, name, parent), nil
+end
+
+-- The window's place and size, saved account-wide whenever you move or resize it.
+local function SaveWindow(f)
+    if f.SetUserPlaced then f:SetUserPlaced(false) end   -- we keep the position, not WoW's layout cache
+    local point, _, relativePoint, x, y = f:GetPoint(1)
+    db.debugWindow = { point = point, relativePoint = relativePoint, x = x, y = y,
+                       width = f:GetWidth(), height = f:GetHeight() }
+end
+
+local function PlaceWindow(f)
+    local w = db.debugWindow
+    f:ClearAllPoints()
+    if w and w.point then
+        f:SetSize(w.width or 620, w.height or 340)
+        f:SetPoint(w.point, UIParent, w.relativePoint or w.point, w.x or 0, w.y or 0)
+    else
+        f:SetSize(620, 340)
+        f:SetPoint("CENTER")
+    end
+end
+
+local function DebugFrame()
+    if debugFrame then return debugFrame end
+    local f, template = CreateWithTemplate("Frame", "RageBusterDebugFrame", UIParent,
+        { "DefaultPanelFlatTemplate", "PortraitFrameFlatTemplate", "BasicFrameTemplateWithInset" })
+    -- The same dark, slightly see-through background as the Game Menu and other
+    -- Blizzard dialogs, in place of the template's own.
+    for _, key in ipairs({ "Bg", "InsetBg" }) do
+        if f[key] and f[key].Hide then f[key]:Hide() end
+    end
+    local bg = f:CreateTexture(nil, "BACKGROUND", nil, -8)
+    bg:SetPoint("TOPLEFT", 3, -3)
+    bg:SetPoint("BOTTOMRIGHT", -3, 3)
+    bg:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Background-Dark", "REPEAT", "REPEAT")
+    if bg.SetHorizTile then
+        bg:SetHorizTile(true)
+        bg:SetVertTile(true)
+    end
+    if not f.CloseButton then
+        local close = CreateWithTemplate("Button", nil, f, { "UIPanelCloseButtonDefaultAnchors", "UIPanelCloseButton" })
+        close:SetPoint("TOPRIGHT", 0, 0)
+    end
+    -- Escape closes it, like Blizzard's own windows
+    if UISpecialFrames then table.insert(UISpecialFrames, "RageBusterDebugFrame") end
+    PlaceWindow(f)
+    f:SetFrameStrata("HIGH")
+    f:SetClampedToScreen(true)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing(); SaveWindow(self) end)
+    local title = "RageBuster: hidden messages (test build)"
+    if f.SetTitle then
+        f:SetTitle(title)
+    elseif f.TitleContainer and f.TitleContainer.TitleText then
+        f.TitleContainer.TitleText:SetText(title)
+    elseif f.TitleText then
+        f.TitleText:SetText(title)
+    end
+    -- closing the window (X, Escape or /rbust debug) turns debug off, and says so
+    f:SetScript("OnHide", function()
+        if ns.debug then
+            ns.debug = false
+            Print("debug OFF")
+        end
+    end)
+
+    -- resizing: a grip in the bottom-right corner, like a chat window
+    f:SetResizable(true)
+    if f.SetResizeBounds then
+        f:SetResizeBounds(320, 160)
+    elseif f.SetMinResize then
+        f:SetMinResize(320, 160)
+    end
+    local grip = CreateFrame("Button", nil, f)
+    grip:SetSize(16, 16)
+    grip:SetPoint("BOTTOMRIGHT", -4, 4)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function() f:StartSizing("BOTTOMRIGHT") end)
+    grip:SetScript("OnMouseUp", function() f:StopMovingOrSizing(); SaveWindow(f); Layout() end)
+    f:SetScript("OnSizeChanged", function() Layout() end)
+
+    local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("TOPLEFT", 14, -30)
+    hint:SetText("Hidden messages appear here. Block adds that player to your ignore list.")
+
+    -- the modern thin scroll bar if this client has it, else the classic one
+    local s, scrollTemplate = CreateWithTemplate("ScrollFrame", nil, f, { "ScrollFrameTemplate", "UIPanelScrollFrameTemplate" })
+    if not scrollTemplate then
+        s:EnableMouseWheel(true)
+        s:SetScript("OnMouseWheel", function(self, delta)
+            local range = self:GetVerticalScrollRange() or 0
+            self:SetVerticalScroll(math.min(math.max((self:GetVerticalScroll() or 0) - delta * 40, 0), range))
+        end)
+    end
+    s:SetPoint("TOPLEFT", 12, -46)
+    s:SetPoint("BOTTOMRIGHT", -30, 22)   -- room for the scroll bar and the resize grip
+    content = CreateFrame("Frame", nil, s)
+    content:SetSize(1, 1)
+    s:SetScrollChild(content)
+    scroll = s
+
+    f:Hide()
+    debugFrame = f
+    return f
+end
+
+local function AddRow(name, line)
+    DebugFrame()
+    local row
+    if #rows >= MAX_ROWS then
+        row = table.remove(rows, 1)
+    else
+        local frame = CreateFrame("Frame", nil, content)
+        local stripe = frame:CreateTexture(nil, "BACKGROUND")   -- faint stripe on every other row
+        stripe:SetAllPoints()
+        stripe:SetColorTexture(1, 1, 1, 0.04)
+        local button = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+        button:SetHeight(20)
+        button:SetPoint("TOPRIGHT", 0, -2)   -- Block sits at the right end of the row
+        if button.SetNormalFontObject then
+            button:SetNormalFontObject("GameFontNormalSmall")
+            button:SetHighlightFontObject("GameFontHighlightSmall")
+            button:SetDisabledFontObject("GameFontDisableSmall")
+        end
+        local text = frame:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
+        text:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -5)
+        text:SetJustifyH("LEFT")
+        if text.SetWordWrap then text:SetWordWrap(true) end
+        row = { frame = frame, button = button, text = text, stripe = stripe }
+        button:SetScript("OnClick", function() AskIgnore(row.author) end)
+    end
+    row.author = name
+    row.text:SetText(line)
+    SetBlocked(row)
+    row.frame:Show()
+    rows[#rows + 1] = row
+    Layout()
+    -- the scroll range only updates after the new size is applied
+    if C_Timer and C_Timer.After then C_Timer.After(0, ScrollToEnd) else ScrollToEnd() end
+end
+
+function ns.DebugShow(name, channel, text, word)
+    AddRow(name, string.format("|cff999999%s|r [%s] |cffffd100%s|r: %s  |cff999999(%s)|r",
+        date("%H:%M"), Bars(channel), Bars(name), Bars(text), Bars(word)))
+end
+
+function commands.debug()
+    local f = DebugFrame()
+    if f:IsShown() then
+        f:Hide()   -- OnHide turns debug off and prints it
+    else
+        ns.debug = true
+        f:Show()
+        Layout()
+        Print("debug ON")
+    end
+end
+--@end-alpha@
 
 function commands.log(arg)
     if arg == "on" or arg == "off" then
@@ -285,10 +644,11 @@ function commands.ignore(arg)
     local evidence = {}
     for _, e in ipairs(db.log) do
         if e.author == name then
-            evidence[#evidence + 1] = { time = e.time, channel = e.channel, word = e.word, msg = e.msg, context = e.context }
+            evidence[#evidence + 1] = { time = e.time, channel = e.channel, word = e.word, msg = e.msg, context = e.context, after = e.after, recent = e.recent }
         end
     end
-    db.ignored[name] = { time = time(), reason = "added by hand", evidence = evidence }
+    -- byHand: tools/sync.py records this as your own decision, for the history and the casebook
+    db.ignored[name] = { time = time(), reason = "added by hand", byHand = true, evidence = evidence }
     db.pardoned[name] = nil
     Print("ignoring %s.", name)
     ApplyNative(false)
@@ -321,8 +681,12 @@ function commands.why(arg)
     local evidence = v.evidence or {}
     if #evidence == 0 and v.msg then evidence = { { msg = v.msg } } end
     for _, e in ipairs(evidence) do
-        print(string.format("  %s [%s] %s", e.time and date("%m-%d %H:%M", e.time) or "?", e.channel or "?", e.msg or ""))
+        Out(string.format("  %s [%s] %s", e.time and date("%m-%d %H:%M", e.time) or "?", e.channel or "?", e.msg or ""))
     end
+end
+
+function commands.window()
+    OpenWindow()
 end
 
 function commands.clearlog()
@@ -332,13 +696,16 @@ end
 
 function commands.help()
     Print("commands:")
-    print("  /ragebuster status - log and ignore counts")
-    print("  /ragebuster log on|off - record blocked messages for review")
-    print("  /ragebuster apply - add pending players to the Blizzard ignore list")
-    print("  /ragebuster ignore Name-Realm / unignore Name-Realm")
-    print("  /ragebuster why Name-Realm - the messages that got a player ignored")
-    print("  /ragebuster clearlog - discard unreviewed log entries")
-    print("  /ragebuster debug - print each blocked message")
+    Out("  /ragebuster status - log and ignore counts")
+    Out("  /ragebuster log on|off - record blocked messages for review")
+    Out("  /ragebuster apply - add pending players to the Blizzard ignore list")
+    Out("  /ragebuster ignore Name-Realm / unignore Name-Realm")
+    Out("  /ragebuster why Name-Realm - the messages that got a player ignored")
+    Out("  /ragebuster clearlog - discard unreviewed log entries")
+    --@alpha@
+    Out("  /ragebuster debug - open or close the window of hidden messages, with Block buttons (test builds only)")
+    --@end-alpha@
+    Out("  /ragebuster window - give RageBuster its own chat tab")
 end
 
 SLASH_RAGEBUSTER1 = "/ragebuster"

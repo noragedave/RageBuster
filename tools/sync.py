@@ -18,7 +18,8 @@ It pulls the repo, then for every game flavor under the WoW folder
 2. writes data/<flavor>/game.json: who the add-on already ignores, who was
    unignored by hand, and which entries are still in the in-game log;
 3. runs tools/review.py, which asks Claude about the new entries through the
-   Claude Code CLI and writes data/<flavor>/Verdicts.lua;
+   Claude Code CLI and writes data/<flavor>/Verdicts.lua, then tools/learn.py,
+   which folds newly settled cases into the reviewer's data/casebook.md;
 4. copies that Verdicts.lua into Interface/AddOns/RageBuster/ so the add-on
    imports it at the next login.
 
@@ -39,6 +40,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import learn
 import review
 import settings
 from wowlua import as_dict, as_list, read_lua_file
@@ -47,7 +49,7 @@ REPO = Path(__file__).resolve().parent.parent
 BRANCH = "main"
 # "by" (which of your characters saw the message) stays in the game; it would
 # put your own character names into the repo.
-LOG_FIELDS = ("id", "time", "author", "guid", "channel", "word", "msg", "context")
+LOG_FIELDS = ("id", "time", "author", "guid", "channel", "word", "msg", "context", "after", "recent")
 
 
 def git(*args: str, capture: bool = False) -> str:
@@ -70,6 +72,8 @@ def known_ids(log_dir: Path) -> set[str]:
 def clean_entry(e: dict) -> dict:
     out = {k: e[k] for k in LOG_FIELDS if e.get(k) is not None}
     out["context"] = [str(line) for line in as_list(e.get("context"))]
+    out["after"] = [str(line) for line in as_list(e.get("after"))]
+    out["recent"] = [str(line) for line in as_list(e.get("recent"))]
     return out
 
 
@@ -77,14 +81,26 @@ def addon_dir(root: Path) -> Path:
     return root / "Interface" / "AddOns" / "RageBuster"
 
 
+def clean_evidence(e: dict) -> dict:
+    out = {k: e[k] for k in ("time", "channel", "word", "msg") if e.get(k) is not None}
+    for k in ("context", "after", "recent"):
+        out[k] = [str(line) for line in as_list(e.get(k))]
+    return out
+
+
 def collect(root: Path, sv_files: list[Path], today: str, dry_run: bool) -> None:
     """Adds the game's new log entries and its ignore state to data/<flavor>/."""
     out = REPO / "data" / root.name
-    log, ignored, pardoned = [], set(), {}
+    log, ignored, pardoned, by_hand = [], set(), {}, {}
     for sv in sv_files:
         db = as_dict(read_lua_file(sv).get("RageBusterDB"))
         log += [clean_entry(e) for e in as_list(db.get("log")) if isinstance(e, dict) and e.get("id")]
         ignored |= set(as_dict(db.get("ignored")))
+        # players you ignored yourself in game; review.record_hand_ignores records them as your decisions
+        for name, rec in as_dict(db.get("ignored")).items():
+            if isinstance(rec, dict) and (rec.get("byHand") or rec.get("reason") == "added by hand"):
+                by_hand[name] = {"time": rec.get("time"),
+                                 "evidence": [clean_evidence(e) for e in as_list(rec.get("evidence")) if isinstance(e, dict)]}
         for name, t in as_dict(db.get("pardoned")).items():
             pardoned[name] = max(t, pardoned.get(name, 0))
 
@@ -96,6 +112,7 @@ def collect(root: Path, sv_files: list[Path], today: str, dry_run: bool) -> None
         "ignored": sorted(ignored),
         "pardoned": dict(sorted(pardoned.items())),
         "logIds": sorted(e["id"] for e in log),
+        "handIgnored": dict(sorted(by_hand.items())),
     }
     if dry_run:
         return
@@ -173,8 +190,14 @@ def main() -> int:
 
     # A dry run writes nothing to data/, so there is nothing new to review.
     failed = 0
+    if not args.dry_run:
+        for root in roots:
+            review.record_hand_ignores(REPO / "data" / root.name, REPO / "data" / "ignored-history.jsonl")
     if not (args.dry_run or args.no_review):
         failed = review.review_all(REPO / "data", args.model)
+        # then fold any newly settled cases into the reviewer's casebook
+        learn.DATA = REPO / "data"
+        failed += learn.learn_all(args.model)
     for root in roots:
         install_verdicts(root, args.dry_run)
 

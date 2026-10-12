@@ -4,6 +4,10 @@ local _, ns = ...
 -- Collateral damage is accepted: this filter only hides messages from YOUR
 -- chat window, it never stops anyone else from talking.
 --
+-- Hiding a word is NOT a judgment about the person who typed it. Whether a
+-- player goes on the ignore list is a separate, much stricter decision made
+-- by the review (tools/review.py and POLICY.md), from the full conversation.
+--
 -- How entries are matched (see Match.lua):
 --   * case-insensitive, WHOLE WORD only ("trump" does not match "trumpet")
 --   * a trailing "s" is tolerated ("democrats" matches "democrat")
@@ -110,10 +114,8 @@ ns.blockedWords = {
     "egirl", "e girl", "women cant", "girls cant",
     "get back in the kitchen", "male gaze",
 
-    -- Religion / ethnicity flashpoints
-    "religion", "religious", "atheist", "atheism",
-    "christian", "christianity", "catholic", "evangelical", "mormon",
-    "islam", "islamic", "muslim", "jew", "jewish", "hindu",
+    -- Ethnicity flashpoints
+    -- (Religion words were taken off this list on request.)
     "black people", "white people", "blacks", "whites", "asians",
     "mexicans", "immigrant", "immigration", "refugee", "migrant",
 
@@ -134,7 +136,7 @@ ns.blockedWords = {
     "virgin", "neckbeard", "basement dweller", "fat ass", "fatass",
     "uninstall", "delete the game", "git gud", "skill issue",
     "touch grass", "cry about it", "stay mad", "cope", "seethe",
-    "dilate", "triggered", "your mom", "ur mom", "yo mama", "rigged",
+    "dilate", "triggered", "ur mom", "yo mama", "rigged",
 
     ---------------------------------------------------------------------
     -- Hot-button issues
