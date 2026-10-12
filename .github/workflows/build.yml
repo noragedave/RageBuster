@@ -1,0 +1,27 @@
+name: Package
+
+# Publishing a GitHub release builds the add-on zip and attaches it to that
+# release. The version in the .toc comes from the release tag.
+# Actions are pinned to commits: this job can write to the repo, and a moved tag
+# could otherwise change what runs here.
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0   # the packager reads tags and history for the version and changelog
+
+      - name: Create and upload package
+        uses: BigWigsMods/packager@e50a250f8705041e40f2fa1ddcb280a686d65aa0 # v2.6.1, same as tools/package.py
+        with:
+          args: -S   # one package for every game version listed in the .toc's Interface line
+        env:
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}

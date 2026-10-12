@@ -40,12 +40,14 @@ from datetime import date
 from pathlib import Path
 
 import review
+import settings
 from wowlua import as_dict, as_list, read_lua_file
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_WOW_DIR = Path(r"C:\Program Files (x86)\World of Warcraft")
 BRANCH = "main"
-LOG_FIELDS = ("id", "time", "author", "guid", "channel", "word", "msg", "context", "by")
+# "by" (which of your characters saw the message) stays in the game; it would
+# put your own character names into the repo.
+LOG_FIELDS = ("id", "time", "author", "guid", "channel", "word", "msg", "context")
 
 
 def git(*args: str, capture: bool = False) -> str:
@@ -107,9 +109,24 @@ def collect(root: Path, sv_files: list[Path], today: str, dry_run: bool) -> None
                                        encoding="utf-8", newline="\n")
 
 
+def safe_verdicts(path: Path) -> bool:
+    """WoW runs Verdicts.lua as code, and this copy may have come from GitHub.
+    Only accept a file that is nothing but `RageBuster_Imported = <literal table>`;
+    the parser rejects function calls or any other code."""
+    try:
+        values = read_lua_file(path)
+    except (ValueError, IndexError):
+        return False
+    return set(values) == {"RageBuster_Imported"} and isinstance(values["RageBuster_Imported"], dict)
+
+
 def install_verdicts(root: Path, dry_run: bool) -> None:
     verdicts = REPO / "data" / root.name / "Verdicts.lua"
     installed = addon_dir(root) / "Verdicts.lua"
+    if verdicts.exists() and not safe_verdicts(verdicts):
+        print(f"{root.name}: {verdicts} isn't a plain verdict table, so it was NOT installed. "
+              "Check its git history.", file=sys.stderr)
+        return
     if verdicts.exists() and (not installed.exists() or installed.read_bytes() != verdicts.read_bytes()):
         print(f"{root.name}: copying new verdicts into the add-on.")
         if not dry_run:
@@ -118,7 +135,8 @@ def install_verdicts(root: Path, dry_run: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--wow-dir", type=Path, default=DEFAULT_WOW_DIR, help="World of Warcraft install folder")
+    parser.add_argument("--wow-dir", type=Path, default=settings.wow_dir(),
+                        help="World of Warcraft folder (default: wowDir in local-settings.json)")
     parser.add_argument("--model", default=review.DEFAULT_MODEL, help=f"Claude model (default {review.DEFAULT_MODEL})")
     parser.add_argument("--dry-run", action="store_true", help="show what would change without writing or pushing")
     parser.add_argument("--no-review", action="store_true", help="collect the log without asking Claude about it")

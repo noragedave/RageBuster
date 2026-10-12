@@ -1,0 +1,12 @@
+package-as: RageBuster
+
+# Only the add-on goes in the package. Everything below is the review pipeline
+# and project notes; data/ holds other players' chat and must never ship.
+# (The packager already skips dotfiles such as .claude/ and .github/.)
+ignore:
+    - README.md
+    - CLAUDE.md
+    - PLAN.md
+    - POLICY.md
+    - tools
+    - data

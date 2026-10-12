@@ -2,7 +2,7 @@
 ## Title: RageBuster
 ## Notes: Hides rage-bait in public chat, logs who said it, and ignores offenders after review.
 ## Author: noragedave
-## Version: 0.1.0
+## Version: @project-version@
 ## SavedVariables: RageBusterDB
 ## SavedVariablesPerCharacter: RageBusterCharDB
 

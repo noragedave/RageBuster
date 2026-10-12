@@ -6,6 +6,9 @@ __pycache__/
 # Personal Claude Code settings (the shared skill in .claude/skills stays committed)
 .claude/settings.local.json
 
+# This PC's WoW location (see tools/settings.py)
+local-settings.json
+
 # Output folder if you run the BigWigs packager locally
 .release/
 

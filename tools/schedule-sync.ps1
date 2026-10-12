@@ -10,7 +10,7 @@
 
 param(
     [string]$At = "03:00",
-    [string]$WowDir = "C:\Program Files (x86)\World of Warcraft",
+    [string]$WowDir = "",   # empty: sync.py reads wowDir from local-settings.json each run
     [switch]$Remove
 )
 
@@ -30,7 +30,8 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 $log = Join-Path $logDir "sync.log"
 
 # cmd.exe handles the redirect, so the log keeps every run
-$command = "`"$uv`" run `"$script`" --wow-dir `"$WowDir`" >> `"$log`" 2>&1"
+$wowArg = if ($WowDir) { " --wow-dir `"$WowDir`"" } else { "" }
+$command = "`"$uv`" run `"$script`"$wowArg >> `"$log`" 2>&1"
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c $command" -WorkingDirectory (Split-Path $PSScriptRoot)
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2)
