@@ -1,0 +1,12 @@
+## Interface: 120100, 50504, 40402, 30403, 20506, 11509, 16001
+## Title: RageBuster
+## Notes: Hides rage-bait in public chat, logs who said it, and ignores offenders after review.
+## Author: noragedave
+## Version: 0.1.0
+## SavedVariables: RageBusterDB
+## SavedVariablesPerCharacter: RageBusterCharDB
+
+BlockList.lua
+Match.lua
+Verdicts.lua
+RageBuster.lua

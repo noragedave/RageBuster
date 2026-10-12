@@ -1,0 +1,15 @@
+PLAN.md
+
+# Python cache files
+__pycache__/
+
+# Personal Claude Code settings (the shared skill in .claude/skills stays committed)
+.claude/settings.local.json
+
+# Output folder if you run the BigWigs packager locally
+.release/
+
+# Windows and editor clutter
+Thumbs.db
+desktop.ini
+.vscode/
