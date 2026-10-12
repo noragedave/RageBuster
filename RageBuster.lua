@@ -1,8 +1,13 @@
 local addonName, ns = ...
 
--- Debug output shows the hidden messages themselves, so it only exists in
--- development and test builds: the packager comments out every "alpha" block
--- (marked below) in tagged, published releases.
+-- Two kinds of build come from this file:
+--   * Published releases: the word filter, the RageBuster player list
+--     (PlayerList.lua) and each user's own blocks. Nothing is logged.
+--   * Test builds (the author's own): all of that, plus logging chat for
+--     review, importing verdicts, and the debug window.
+-- Everything only test builds need sits between "alpha" markers. The packager
+-- comments those blocks out of tagged, published releases, so the code isn't
+-- there to run.
 ns.debug = false   -- toggle in game with: /ragebuster debug (test builds only)
 
 local PREFIX = "|cffff8800[RageBuster]|r "
@@ -82,10 +87,13 @@ end
 local function InitDB()
     RageBusterDB = RageBusterDB or {}
     db = RageBusterDB
+    db.ignored = db.ignored or {}     -- ["Name-Realm"] = { time, reason, ... }: your own blocks
+    db.unhidden = db.unhidden or {}   -- ["Name-Realm"] = true: on the RageBuster list, but shown for you
+    --@alpha@
     db.logging = db.logging ~= false
     db.seq = db.seq or 0
     db.log = db.log or {}
-    db.ignored = db.ignored or {}     -- ["Name-Realm"] = { time, reason, msg, guid, evidence }
+    --@end-alpha@
     db.pardoned = db.pardoned or {}   -- ["Name-Realm"] = time the player was unignored
     db.released = db.released or {}   -- ignore records kept after an unignore, for review
 
@@ -94,6 +102,7 @@ local function InitDB()
     charDB.applied = charDB.applied or {}   -- names this character has native-ignored
 end
 
+--@alpha@
 -- merge what tools/review.py wrote into Verdicts.lua
 local function ImportVerdicts()
     local imp = RageBuster_Imported
@@ -221,20 +230,11 @@ local function Remember(key, line)
     if #lines > CONTEXT_LINES then table.remove(lines, 1) end
 end
 
----------------------------------------------------------------------
--- The chat filter
----------------------------------------------------------------------
-local function Process(event, msg, author, ...)
-    local name = FullName(author)
-
-    if db.ignored[name] then
-        return true
-    end
-
+-- Everything the review needs from one line of public chat.
+local function Record(event, name, msg, hit, ...)
     local _, channelString, _, _, _, channelIndex, _, _, _, guid = ...
     local key = event .. (channelIndex or "")
     local text = ns.PlainText(msg)
-    local hit = ns.MatchBlocked(msg)
     local line = Line(name, text)
     local channel = (channelString and channelString ~= "") and channelString or event:gsub("^CHAT_MSG_", "")
 
@@ -242,11 +242,9 @@ local function Process(event, msg, author, ...)
     AddReply(key, line)
 
     if hit then
-        --@alpha@
         if ns.debug and ns.DebugShow then
             ns.DebugShow(name, channel, text, hit)
         end
-        --@end-alpha@
         if db.logging and name ~= MyName() then
             if issecretvalue and guid and issecretvalue(guid) then guid = nil end
             LogHit(event, name, text, hit, channel, guid, key)
@@ -255,6 +253,28 @@ local function Process(event, msg, author, ...)
 
     Remember(key, line)
     if name ~= MyName() then RememberPlayer(name, channel, text) end
+end
+--@end-alpha@
+
+---------------------------------------------------------------------
+-- The chat filter
+---------------------------------------------------------------------
+-- On the RageBuster list (PlayerList.lua), and not un-hidden by this user.
+local function Listed(name)
+    return ns.listedPlayers ~= nil and ns.listedPlayers[name] == true and not db.unhidden[name]
+end
+
+local function Process(event, msg, author, ...)
+    local name = FullName(author)
+
+    if db.ignored[name] or Listed(name) then
+        return true
+    end
+
+    local hit = ns.MatchBlocked(msg)
+    --@alpha@
+    Record(event, name, msg, hit, ...)
+    --@end-alpha@
     return hit ~= nil
 end
 
@@ -352,7 +372,9 @@ frame:RegisterEvent("PLAYER_LOGIN")
 frame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" and arg1 == addonName then
         InitDB()
+        --@alpha@
         ImportVerdicts()
+        --@end-alpha@
     elseif event == "PLAYER_LOGIN" then
         C_Timer.After(10, function() ApplyNative(false) end)
     end
@@ -370,8 +392,16 @@ end
 local commands = {}
 
 function commands.status()
-    Print("logging %s, %d log entries awaiting review, %d players ignored.",
-        db.logging and "ON" or "OFF", #db.log, CountKeys(db.ignored))
+    local listed, shown = 0, 0
+    for name in pairs(ns.listedPlayers or {}) do
+        listed = listed + 1
+        if db.unhidden[name] then shown = shown + 1 end
+    end
+    Print("%d players on the RageBuster list (%d shown again by you), %d on your own block list.",
+        listed, shown, CountKeys(db.ignored))
+    --@alpha@
+    Print("logging %s, %d log entries awaiting review.", db.logging and "ON" or "OFF", #db.log)
+    --@end-alpha@
 end
 
 --@alpha@
@@ -627,12 +657,14 @@ function commands.debug()
 end
 --@end-alpha@
 
+--@alpha@
 function commands.log(arg)
     if arg == "on" or arg == "off" then
         db.logging = arg == "on"
     end
     Print("logging %s", db.logging and "ON" or "OFF")
 end
+--@end-alpha@
 
 function commands.apply()
     ApplyNative(true)
@@ -641,14 +673,21 @@ end
 function commands.ignore(arg)
     if arg == "" then return Print("usage: /ragebuster ignore Name-Realm") end
     local name = FullName(arg)
-    local evidence = {}
-    for _, e in ipairs(db.log) do
-        if e.author == name then
-            evidence[#evidence + 1] = { time = e.time, channel = e.channel, word = e.word, msg = e.msg, context = e.context, after = e.after, recent = e.recent }
-        end
+    if ns.listedPlayers and ns.listedPlayers[name] and db.unhidden[name] then
+        db.unhidden[name] = nil
+        return Print("hiding %s again (they're on the RageBuster list).", name)
     end
     -- byHand: tools/sync.py records this as your own decision, for the history and the casebook
-    db.ignored[name] = { time = time(), reason = "added by hand", byHand = true, evidence = evidence }
+    local record = { time = time(), reason = "added by hand", byHand = true }
+    --@alpha@
+    record.evidence = {}
+    for _, e in ipairs(db.log) do
+        if e.author == name then
+            record.evidence[#record.evidence + 1] = { time = e.time, channel = e.channel, word = e.word, msg = e.msg, context = e.context, after = e.after, recent = e.recent }
+        end
+    end
+    --@end-alpha@
+    db.ignored[name] = record
     db.pardoned[name] = nil
     Print("ignoring %s.", name)
     ApplyNative(false)
@@ -657,7 +696,14 @@ end
 function commands.unignore(arg)
     if arg == "" then return Print("usage: /ragebuster unignore Name-Realm") end
     local name = FullName(arg)
-    if not db.ignored[name] then return Print("%s is not on the list.", name) end
+    if not db.ignored[name] then
+        if ns.listedPlayers and ns.listedPlayers[name] then
+            -- only for this user; the list itself is unchanged
+            db.unhidden[name] = true
+            return Print("%s is on the RageBuster list; showing their chat for you. /rbust ignore %s hides it again.", name, name)
+        end
+        return Print("%s isn't on your block list or the RageBuster list.", name)
+    end
     local record = db.ignored[name]
     record.releasedAt = time()
     db.released[name] = record
@@ -671,6 +717,9 @@ function commands.unignore(arg)
     Print("%s removed. Other characters keep their Blizzard ignore until you remove it there.", name)
 end
 
+commands.unhide = commands.unignore
+
+--@alpha@
 function commands.why(arg)
     if arg == "" then return Print("usage: /ragebuster why Name-Realm") end
     local name = FullName(arg)
@@ -684,25 +733,29 @@ function commands.why(arg)
         Out(string.format("  %s [%s] %s", e.time and date("%m-%d %H:%M", e.time) or "?", e.channel or "?", e.msg or ""))
     end
 end
+--@end-alpha@
 
 function commands.window()
     OpenWindow()
 end
 
+--@alpha@
 function commands.clearlog()
     db.log = {}
     Print("log cleared.")
 end
+--@end-alpha@
 
 function commands.help()
     Print("commands:")
-    Out("  /ragebuster status - log and ignore counts")
-    Out("  /ragebuster log on|off - record blocked messages for review")
-    Out("  /ragebuster apply - add pending players to the Blizzard ignore list")
-    Out("  /ragebuster ignore Name-Realm / unignore Name-Realm")
-    Out("  /ragebuster why Name-Realm - the messages that got a player ignored")
-    Out("  /ragebuster clearlog - discard unreviewed log entries")
+    Out("  /ragebuster status - how many players are hidden, and why")
+    Out("  /ragebuster ignore Name-Realm - hide a player (your own block list)")
+    Out("  /ragebuster unignore Name-Realm - show them again, including players on the RageBuster list")
+    Out("  /ragebuster apply - add your own blocks to the Blizzard ignore list")
     --@alpha@
+    Out("  /ragebuster log on|off - record blocked messages for review (test builds only)")
+    Out("  /ragebuster why Name-Realm - the messages that got a player ignored (test builds only)")
+    Out("  /ragebuster clearlog - discard unreviewed log entries (test builds only)")
     Out("  /ragebuster debug - open or close the window of hidden messages, with Block buttons (test builds only)")
     --@end-alpha@
     Out("  /ragebuster window - give RageBuster its own chat tab")

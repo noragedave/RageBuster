@@ -88,7 +88,24 @@ def bash_path(p: Path) -> str:
     return f"/{drive[0].lower()}{rest}"
 
 
+def check_toc_files() -> None:
+    """The packager only copies files git tracks, so a new file the .toc loads but that was
+    never `git add`ed is silently left out, and the add-on errors in game. Catch that here."""
+    toc = (REPO / f"{ADDON}.toc").read_text(encoding="utf-8").splitlines()
+    files = [line.strip() for line in toc if line.strip() and not line.startswith("#")]
+    tracked = set(subprocess.run(["git", "-C", str(REPO), "ls-files"], capture_output=True, text=True,
+                                 check=True).stdout.split())
+    missing = [f for f in files if not (REPO / f).exists()]
+    untracked = [f for f in files if (REPO / f).exists() and f not in tracked]
+    if missing:
+        sys.exit(f"The .toc lists files that don't exist: {', '.join(missing)}")
+    if untracked:
+        sys.exit(f"The .toc loads files git doesn't track yet, so the packager would leave them out: "
+                 f"{', '.join(untracked)}. Run: git add {' '.join(untracked)}")
+
+
 def build() -> Path:
+    check_toc_files()
     out = RELEASE / ADDON
     shutil.rmtree(out, ignore_errors=True)
     # -d: don't upload anywhere   -z: we zip below (Git Bash has no zip)   -S: same as the workflow

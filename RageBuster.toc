@@ -1,6 +1,6 @@
 ## Interface: 120100, 50504, 40402, 30403, 20506, 11509, 16001
 ## Title: RageBuster
-## Notes: Hides rage-bait in public chat, logs who said it, and ignores offenders after review.
+## Notes: Hides rage-bait in public chat, and the players on the RageBuster list. Each player can be shown again with /rbust unignore.
 ## Author: noragedave
 ## Version: @project-version@
 ## SavedVariables: RageBusterDB
@@ -9,4 +9,5 @@
 BlockList.lua
 Match.lua
 Verdicts.lua
+PlayerList.lua
 RageBuster.lua
