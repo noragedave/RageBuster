@@ -50,13 +50,15 @@ end
 ---------------------------------------------------------------------
 local singles, phrases, safe, built
 
+-- ns.disabledCategories (["key"] = true) and ns.customWords (a list) are the
+-- user's settings from RageBuster.lua; call ns.RebuildWords() after changing them.
 local function Build()
     built = true
     singles, phrases, safe = {}, {}, {}
 
-    for _, w in ipairs(ns.blockedWords or {}) do
+    local function Add(w)
         local n = Clean(w)
-        if n ~= "" then
+        if n ~= "" and not singles[n] then
             if n:find(" ", 1, true) then
                 phrases[#phrases + 1] = { word = n, a = " " .. n .. " ", b = " " .. n .. "s " }
             else
@@ -64,6 +66,14 @@ local function Build()
             end
         end
     end
+
+    local off = ns.disabledCategories or {}
+    for _, cat in ipairs(ns.wordCategories or {}) do
+        if not off[cat.key] then
+            for _, w in ipairs(cat.words) do Add(w) end
+        end
+    end
+    for _, w in ipairs(ns.customWords or {}) do Add(w) end
 
     for _, p in ipairs(ns.safePhrases or {}) do
         safe[#safe + 1] = " " .. Clean(p) .. " "
@@ -88,6 +98,15 @@ local function FindBlockedWord(text)
             return ph.word, ph.word
         end
     end
+end
+
+function ns.RebuildWords()
+    built = false
+end
+
+-- a word the way matching sees it: lowercase, no punctuation ("Let's go!" -> "lets go")
+function ns.CleanWord(w)
+    return Clean(w or "")
 end
 
 -- returns the blocked word that matched and the list entry it came from, or nil

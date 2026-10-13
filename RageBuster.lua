@@ -49,6 +49,7 @@ end
 local function Print(...)
     Out(PREFIX .. string.format(...))
 end
+ns.Print = Print
 
 -- Opens a "RageBuster" chat tab that shows only this add-on's output.
 local function OpenWindow()
@@ -96,6 +97,10 @@ local function InitDB()
     --@end-alpha@
     db.pardoned = db.pardoned or {}   -- ["Name-Realm"] = time the player was unignored
     db.released = db.released or {}   -- ignore records kept after an unignore, for review
+    db.customWords = db.customWords or {}                 -- words you added in the options panel
+    db.disabledCategories = db.disabledCategories or {}   -- ["key"] = true: categories you switched off
+    ns.customWords, ns.disabledCategories = db.customWords, db.disabledCategories
+    ns.RebuildWords()
 
     RageBusterCharDB = RageBusterCharDB or {}
     charDB = RageBusterCharDB
@@ -232,7 +237,7 @@ end
 
 -- Everything the review needs from one line of public chat.
 local function Record(event, name, msg, hit, ...)
-    local _, channelString, _, _, _, channelIndex, _, _, _, guid = ...
+    local _, channelString, _, _, _, channelIndex, _, _, lineID, guid = ...
     local key = event .. (channelIndex or "")
     local text = ns.PlainText(msg)
     local line = Line(name, text)
@@ -243,7 +248,7 @@ local function Record(event, name, msg, hit, ...)
 
     if hit then
         if ns.debug and ns.DebugShow then
-            ns.DebugShow(name, channel, text, hit)
+            ns.DebugShow(name, channel, text, hit, lineID)
         end
         if db.logging and name ~= MyName() then
             if issecretvalue and guid and issecretvalue(guid) then guid = nil end
@@ -264,10 +269,13 @@ local function Listed(name)
     return ns.listedPlayers ~= nil and ns.listedPlayers[name] == true and not db.unhidden[name]
 end
 
+-- Temporary blocks from the debug window: kept in memory only, so they end at logout or /reload.
+local tempIgnored = {}
+
 local function Process(event, msg, author, ...)
     local name = FullName(author)
 
-    if db.ignored[name] or Listed(name) then
+    if db.ignored[name] or tempIgnored[name] or Listed(name) then
         return true
     end
 
@@ -377,6 +385,9 @@ frame:SetScript("OnEvent", function(self, event, arg1)
         --@end-alpha@
     elseif event == "PLAYER_LOGIN" then
         C_Timer.After(10, function() ApplyNative(false) end)
+        --@alpha@
+        ns.ReopenDebug()   -- if it was open at logout or /reload
+        --@end-alpha@
     end
 end)
 
@@ -399,6 +410,11 @@ function commands.status()
     end
     Print("%d players on the RageBuster list (%d shown again by you), %d on your own block list.",
         listed, shown, CountKeys(db.ignored))
+    local on = 0
+    for _, cat in ipairs(ns.wordCategories) do
+        if not db.disabledCategories[cat.key] then on = on + 1 end
+    end
+    Print("%d of %d word categories on; your own words: %d.", on, #ns.wordCategories, #db.customWords)
     --@alpha@
     Print("logging %s, %d log entries awaiting review.", db.logging and "ON" or "OFF", #db.log)
     --@end-alpha@
@@ -407,12 +423,15 @@ end
 --@alpha@
 ---------------------------------------------------------------------
 -- Debug window (test builds only): every hidden message as it happens,
--- each with a Block button that ignores the player as your own decision.
--- The window can be moved, and resized from its bottom-right corner.
+-- each with a Block button that ignores the player as your own decision,
+-- and a Clear button that removes the row. Clearing only empties the window;
+-- the review log is untouched. The window can be moved, and resized from its
+-- bottom-right corner.
 ---------------------------------------------------------------------
 local MAX_ROWS = 300    -- oldest rows are reused past this
 local debugFrame, scroll, content
-local rows = {}         -- oldest first: { frame, button, text, author }
+local rows = {}         -- oldest first: { frame, button, clear, text, author }
+local spare = {}        -- cleared rows, kept to reuse
 
 local function Bars(s)   -- "|" starts a WoW escape code, so double it in shown text
     return (tostring(s or ""):gsub("|", "||"))
@@ -432,6 +451,17 @@ local function SetBlocked(row)
         row.button:Enable()
     end
     FitButton(row.button)
+    if tempIgnored[row.author] then
+        row.temp:SetText("Temp on")
+        row.temp:Disable()
+    elseif db.ignored[row.author] then
+        row.temp:SetText("Temp")
+        row.temp:Disable()
+    else
+        row.temp:SetText("Temp")
+        row.temp:Enable()
+    end
+    FitButton(row.temp)
 end
 
 -- stacks the rows top to bottom; the message text wraps to the window's width
@@ -442,14 +472,49 @@ local function Layout()
     local y = 0
     for i, row in ipairs(rows) do
         if i % 2 == 0 then row.stripe:Show() else row.stripe:Hide() end
-        row.text:SetWidth(width - row.button:GetWidth() - 10)   -- message on the left, Block on the right
-        local h = math.max((row.text:GetStringHeight() or 0) + 6, 24)
+        -- the buttons sit on a line of their own at the right, the message wraps below them
+        row.text:SetWidth(width - 6)
+        local h = (row.text:GetStringHeight() or 0) + 32   -- buttons on top, message below
         row.frame:ClearAllPoints()
         row.frame:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
         row.frame:SetSize(width, h)
         y = y + h
     end
     content:SetHeight(math.max(y, 1))
+end
+
+
+-- Blocks a player until logout. Nothing is saved or recorded for review.
+local function TempIgnore(name)
+    if db.ignored[name] then return Print("%s is already ignored.", name) end
+    tempIgnored[name] = true
+    Print("temporarily ignoring %s until you log out.", name)
+    for _, row in ipairs(rows) do
+        if row.author == name then SetBlocked(row) end
+    end
+    Layout()
+end
+
+-- Clearing hides rows from the window only; db.log keeps every entry.
+local function RemoveRow(row)
+    for i, r in ipairs(rows) do
+        if r == row then
+            table.remove(rows, i)
+            row.frame:Hide()
+            spare[#spare + 1] = row
+            break
+        end
+    end
+    Layout()
+end
+
+local function ClearAll()
+    for i = #rows, 1, -1 do
+        rows[i].frame:Hide()
+        spare[#spare + 1] = rows[i]
+        rows[i] = nil
+    end
+    Layout()
 end
 
 local function ScrollToEnd()
@@ -484,6 +549,35 @@ local function AskIgnore(name)
     else
         Print("to ignore %s, type /rbust ignore %s", name, name)
     end
+end
+
+-- "Block (RageBuster)" in the menu you get by right-clicking a player's name
+-- in chat. It asks first, like the window's Block button.
+local function MenuName(name, server)
+    if not name or name == "" then return nil end
+    if server and server ~= "" and not name:find("-", 1, true) then
+        name = name .. "-" .. server:gsub("[%s%-]", "")   -- realm names drop spaces, like "Area52"
+    end
+    return FullName(name)
+end
+
+if Menu and Menu.ModifyMenu then
+    -- the menu system since 11.0 (and in clients that took it up since)
+    Menu.ModifyMenu("MENU_UNIT_FRIEND", function(_, root, context)
+        local name = context and MenuName(context.name, context.server)
+        if not name or name == MyName() then return end
+        root:CreateDivider()
+        root:CreateButton("Block (RageBuster)", function() AskIgnore(name) end)
+    end)
+elseif hooksecurefunc and UnitPopup_ShowMenu and UIDropDownMenu_AddButton then
+    -- older clients: add a line to the dropdown after Blizzard builds it
+    hooksecurefunc("UnitPopup_ShowMenu", function(dropdown, which, _, name)
+        if which ~= "FRIEND" or UIDROPDOWNMENU_MENU_LEVEL ~= 1 then return end
+        local full = MenuName(name or (dropdown and dropdown.name), dropdown and dropdown.server)
+        if not full or full == MyName() then return end
+        UIDropDownMenu_AddButton({ text = "Block (RageBuster)", notCheckable = true,
+                                   func = function() AskIgnore(full) end })
+    end)
 end
 
 -- Clients differ in which frame templates they have, so try the modern ones first.
@@ -536,8 +630,6 @@ local function DebugFrame()
         local close = CreateWithTemplate("Button", nil, f, { "UIPanelCloseButtonDefaultAnchors", "UIPanelCloseButton" })
         close:SetPoint("TOPRIGHT", 0, 0)
     end
-    -- Escape closes it, like Blizzard's own windows
-    if UISpecialFrames then table.insert(UISpecialFrames, "RageBusterDebugFrame") end
     PlaceWindow(f)
     f:SetFrameStrata("HIGH")
     f:SetClampedToScreen(true)
@@ -546,7 +638,7 @@ local function DebugFrame()
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing(); SaveWindow(self) end)
-    local title = "RageBuster: hidden messages (test build)"
+    local title = "RageBuster"
     if f.SetTitle then
         f:SetTitle(title)
     elseif f.TitleContainer and f.TitleContainer.TitleText then
@@ -554,10 +646,13 @@ local function DebugFrame()
     elseif f.TitleText then
         f.TitleText:SetText(title)
     end
-    -- closing the window (X, Escape or /rbust debug) turns debug off, and says so
-    f:SetScript("OnHide", function()
-        if ns.debug then
+    -- closing the window (X or /rbust debug) turns debug off, and says so.
+    -- OnHide also fires when only a parent hides, as UIParent does during a
+    -- loading screen; the window is still "shown" then and comes back after.
+    f:SetScript("OnHide", function(self)
+        if ns.debug and not self:IsShown() then
             ns.debug = false
+            db.debugOpen = false
             Print("debug OFF")
         end
     end)
@@ -579,9 +674,16 @@ local function DebugFrame()
     grip:SetScript("OnMouseUp", function() f:StopMovingOrSizing(); SaveWindow(f); Layout() end)
     f:SetScript("OnSizeChanged", function() Layout() end)
 
-    local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("TOPLEFT", 14, -30)
-    hint:SetText("Hidden messages appear here. Block adds that player to your ignore list.")
+    local clearAll = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    clearAll:SetHeight(20)
+    clearAll:SetPoint("BOTTOMLEFT", 12, 6)
+    if clearAll.SetNormalFontObject then
+        clearAll:SetNormalFontObject("GameFontNormalSmall")
+        clearAll:SetHighlightFontObject("GameFontHighlightSmall")
+    end
+    clearAll:SetText("Clear all")
+    FitButton(clearAll)
+    clearAll:SetScript("OnClick", ClearAll)
 
     -- the modern thin scroll bar if this client has it, else the classic one
     local s, scrollTemplate = CreateWithTemplate("ScrollFrame", nil, f, { "ScrollFrameTemplate", "UIPanelScrollFrameTemplate" })
@@ -592,8 +694,8 @@ local function DebugFrame()
             self:SetVerticalScroll(math.min(math.max((self:GetVerticalScroll() or 0) - delta * 40, 0), range))
         end)
     end
-    s:SetPoint("TOPLEFT", 12, -46)
-    s:SetPoint("BOTTOMRIGHT", -30, 22)   -- room for the scroll bar and the resize grip
+    s:SetPoint("TOPLEFT", 12, -30)
+    s:SetPoint("BOTTOMRIGHT", -30, 30)   -- room for the scroll bar, Clear all and the resize grip
     content = CreateFrame("Frame", nil, s)
     content:SetSize(1, 1)
     s:SetScrollChild(content)
@@ -604,32 +706,75 @@ local function DebugFrame()
     return f
 end
 
-local function AddRow(name, line)
+-- Opens Blizzard's own report dialog for a chat line. The line ID is only good while the
+-- game still holds that message, so older rows may fail; the player gets told rather than an error.
+local function ReportChat(name, lineID)
+    if not lineID then return Print("no chat line to report for %s.", name) end
+    local ok, opened = pcall(function()
+        if not (PlayerLocation and PlayerLocation.CreateFromChatLineID) then return false end
+        local location = PlayerLocation:CreateFromChatLineID(lineID)
+        if not location then return false end
+        if ReportFrame and ReportFrame.InitiateReport and ReportInfo and Enum and Enum.ReportType then
+            -- the dialog since 9.2.5 / 10.x
+            local info = ReportInfo:CreateReportInfoFromType(Enum.ReportType.Chat)
+            ReportFrame:InitiateReport(info, name, location)
+            return true
+        end
+        if C_ReportSystem and C_ReportSystem.OpenReportPlayerDialog and PLAYER_REPORT_TYPE_LANGUAGE then
+            C_ReportSystem.OpenReportPlayerDialog(PLAYER_REPORT_TYPE_LANGUAGE, name, location)
+            return true
+        end
+        return false
+    end)
+    if not (ok and opened) then
+        Print("couldn't open the report dialog for %s; right-click their name in chat to report instead.", name)
+    end
+end
+
+local function AddRow(name, line, lineID)
     DebugFrame()
     local row
     if #rows >= MAX_ROWS then
         row = table.remove(rows, 1)
+    elseif #spare > 0 then
+        row = table.remove(spare)
     else
         local frame = CreateFrame("Frame", nil, content)
         local stripe = frame:CreateTexture(nil, "BACKGROUND")   -- faint stripe on every other row
         stripe:SetAllPoints()
         stripe:SetColorTexture(1, 1, 1, 0.04)
-        local button = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-        button:SetHeight(20)
-        button:SetPoint("TOPRIGHT", 0, -2)   -- Block sits at the right end of the row
-        if button.SetNormalFontObject then
-            button:SetNormalFontObject("GameFontNormalSmall")
-            button:SetHighlightFontObject("GameFontHighlightSmall")
-            button:SetDisabledFontObject("GameFontDisableSmall")
+        local function SmallButton(label)
+            local b = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+            b:SetHeight(20)
+            if b.SetNormalFontObject then
+                b:SetNormalFontObject("GameFontNormalSmall")
+                b:SetHighlightFontObject("GameFontHighlightSmall")
+                b:SetDisabledFontObject("GameFontDisableSmall")
+            end
+            if label then b:SetText(label); FitButton(b) end
+            return b
         end
+        local button = SmallButton()
+        button:SetPoint("TOPRIGHT", 0, -2)   -- Block sits at the right end of the row
+        local temp = SmallButton("Temp")
+        temp:SetPoint("TOPRIGHT", button, "TOPLEFT", -2, 0)
+        local report = SmallButton("Report")
+        report:SetPoint("TOPRIGHT", temp, "TOPLEFT", -2, 0)
+        local clear = SmallButton("Clear")
+        clear:SetPoint("TOPRIGHT", report, "TOPLEFT", -2, 0)
         local text = frame:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
-        text:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -5)
+        text:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -26)
         text:SetJustifyH("LEFT")
         if text.SetWordWrap then text:SetWordWrap(true) end
-        row = { frame = frame, button = button, text = text, stripe = stripe }
+        row = { frame = frame, button = button, temp = temp, report = report, clear = clear, text = text, stripe = stripe }
         button:SetScript("OnClick", function() AskIgnore(row.author) end)
+        temp:SetScript("OnClick", function() TempIgnore(row.author) end)
+        report:SetScript("OnClick", function() ReportChat(row.author, row.lineID) end)
+        clear:SetScript("OnClick", function() RemoveRow(row) end)
     end
     row.author = name
+    row.lineID = lineID
+    if lineID and not (issecretvalue and issecretvalue(lineID)) then row.report:Enable() else row.report:Disable() end
     row.text:SetText(line)
     SetBlocked(row)
     row.frame:Show()
@@ -639,9 +784,9 @@ local function AddRow(name, line)
     if C_Timer and C_Timer.After then C_Timer.After(0, ScrollToEnd) else ScrollToEnd() end
 end
 
-function ns.DebugShow(name, channel, text, word)
+function ns.DebugShow(name, channel, text, word, lineID)
     AddRow(name, string.format("|cff999999%s|r [%s] |cffffd100%s|r: %s  |cff999999(%s)|r",
-        date("%H:%M"), Bars(channel), Bars(name), Bars(text), Bars(word)))
+        date("%H:%M"), Bars(channel), Bars(name), Bars(text), Bars(word)), lineID)
 end
 
 function commands.debug()
@@ -650,10 +795,15 @@ function commands.debug()
         f:Hide()   -- OnHide turns debug off and prints it
     else
         ns.debug = true
+        db.debugOpen = true   -- reopens after /reload or logging back in
         f:Show()
         Layout()
         Print("debug ON")
     end
+end
+
+function ns.ReopenDebug()
+    if db.debugOpen and not ns.debug then commands.debug() end
 end
 --@end-alpha@
 
@@ -693,9 +843,21 @@ function commands.ignore(arg)
     ApplyNative(false)
 end
 
+--@alpha@
+function commands.tempignore(arg)
+    if arg == "" then return Print("usage: /ragebuster tempignore Name-Realm") end
+    TempIgnore(FullName(arg))
+end
+--@end-alpha@
+
 function commands.unignore(arg)
     if arg == "" then return Print("usage: /ragebuster unignore Name-Realm") end
     local name = FullName(arg)
+    if tempIgnored[name] then
+        tempIgnored[name] = nil
+        Print("%s is no longer temporarily ignored.", name)
+        if not db.ignored[name] then return end
+    end
     if not db.ignored[name] then
         if ns.listedPlayers and ns.listedPlayers[name] then
             -- only for this user; the list itself is unchanged
@@ -752,14 +914,21 @@ function commands.help()
     Out("  /ragebuster ignore Name-Realm - hide a player (your own block list)")
     Out("  /ragebuster unignore Name-Realm - show them again, including players on the RageBuster list")
     Out("  /ragebuster apply - add your own blocks to the Blizzard ignore list")
+    Out("  /ragebuster options - choose word categories and add your own words")
     --@alpha@
     Out("  /ragebuster log on|off - record blocked messages for review (test builds only)")
     Out("  /ragebuster why Name-Realm - the messages that got a player ignored (test builds only)")
+    Out("  /ragebuster tempignore Name-Realm - hide a player until you log out (test builds only)")
     Out("  /ragebuster clearlog - discard unreviewed log entries (test builds only)")
     Out("  /ragebuster debug - open or close the window of hidden messages, with Block buttons (test builds only)")
     --@end-alpha@
     Out("  /ragebuster window - give RageBuster its own chat tab")
 end
+
+function commands.options()
+    if ns.OpenOptions then ns.OpenOptions() end
+end
+commands.config = commands.options
 
 SLASH_RAGEBUSTER1 = "/ragebuster"
 SLASH_RAGEBUSTER2 = "/rbust"

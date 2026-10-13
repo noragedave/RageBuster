@@ -30,7 +30,7 @@ Where WoW lives, and which flavor folders `--install` targets, come from `local-
 
 An empty `installFlavors` means every flavor folder with `Interface/AddOns`. Single backslashes in paths are fine. If the user says WoW or their test flavor has moved for good, edit this file rather than passing flags each time. Then say which folder you installed into, so a stale setting is easy to spot.
 
-"So I can test it" or "put it in WoW" means install. "Make a zip" or "build a package" alone means build only. If it's unclear, build only and offer to install. Building is harmless, while installing replaces files in their game folder.
+Installing is the point of a test build, so install by default: running this skill, or any request to test, try or package, means `--install`. Build only (no install) when the user explicitly asks for just a zip or says not to install.
 
 Installing replaces the add-on's files but deliberately keeps the existing `Verdicts.lua` in each install. That file holds the real verdicts the nightly `tools/sync.py` put there, and the repo's copy is only an empty placeholder. Leave that behavior alone. Overwriting the file would silently drop pending ignores.
 
@@ -43,7 +43,7 @@ Installing replaces the add-on's files but deliberately keeps the existing `Verd
 
 The script prints the packager's `Copying:` and `Ignoring:` lines. Read them before reporting, because this is the step that catches a bad `.pkgmeta`:
 
-- **Should be copied:** `RageBuster.toc`, `BlockList.lua`, `Match.lua`, `RageBuster.lua`, `Verdicts.lua`, and the generated `CHANGELOG.md`.
+- **Should be copied:** `RageBuster.toc`, `BlockList.lua`, `Match.lua`, `Verdicts.lua`, `PlayerList.lua`, `RageBuster.lua`, `Options.lua`, and the generated `CHANGELOG.md`.
 - **Should be ignored:** `tools/`, `data/`, `POLICY.md`, `PLAN.md`, `CLAUDE.md`, `README.md`. Dotfiles such as `.claude/` and `.github/` are skipped automatically.
 
 If anything from `data/` shows up as copied, stop and tell the user, because that folder holds other players' chat logs and must never be packaged. Likewise, if a file the `.toc` lists is missing from the package, the add-on will error on load. Point that out.

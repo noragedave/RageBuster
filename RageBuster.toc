@@ -11,3 +11,4 @@ Match.lua
 Verdicts.lua
 PlayerList.lua
 RageBuster.lua
+Options.lua
