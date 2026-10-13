@@ -8,5 +8,6 @@ ignore:
     - CLAUDE.md
     - PLAN.md
     - POLICY.md
+    - EXCEPTIONS.md
     - tools
     - data
