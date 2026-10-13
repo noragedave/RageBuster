@@ -18,7 +18,6 @@ local AFTER_SECONDS = 300   -- stop waiting for replies after this long
 local PLAYER_LINES = 20     -- the author's own recent messages kept with each hit
 local PLAYER_FORGET = 1800  -- forget players silent this long, once many are tracked
 local PLAYER_MAX = 500
-local MAX_NATIVE = 50       -- Blizzard's per-character ignore list cap
 
 local db, charDB
 
@@ -104,7 +103,9 @@ local function InitDB()
 
     RageBusterCharDB = RageBusterCharDB or {}
     charDB = RageBusterCharDB
-    charDB.applied = charDB.applied or {}   -- names this character has native-ignored
+    -- names earlier versions put on this character's Blizzard ignore list, so
+    -- unignore can still take them off it
+    charDB.applied = charDB.applied or {}
 end
 
 --@alpha@
@@ -307,56 +308,6 @@ local function ChatFilter(self, event, msg, author, ...)
 end
 
 ---------------------------------------------------------------------
--- Blizzard ignore list
----------------------------------------------------------------------
--- Ignoring a character natively hides every character on that player's
--- account, but only for the character that did the ignoring, and the list
--- holds 50 names. Everyone past that is still hidden by the filter above.
-local NativeAddIgnore = (C_FriendList and C_FriendList.AddIgnore) or AddIgnore
-local NativeNumIgnores = (C_FriendList and C_FriendList.GetNumIgnores) or GetNumIgnores
-local NativeIsIgnored = (C_FriendList and C_FriendList.IsIgnored) or IsIgnored
-
-local applying = false
-
-local function ApplyNative(verbose)
-    if applying or not NativeAddIgnore then return end
-
-    local pending = {}
-    for name, v in pairs(db.ignored) do
-        if not charDB.applied[name] then
-            pending[#pending + 1] = { name = name, time = v.time or 0 }
-        end
-    end
-    -- newest offenders first, since the room is limited
-    table.sort(pending, function(a, b) return a.time > b.time end)
-
-    local room = MAX_NATIVE - (NativeNumIgnores() or 0)
-    local count = math.min(#pending, math.max(room, 0))
-
-    if verbose or count > 0 then
-        Print("adding %d of %d pending players to the Blizzard ignore list (%d slots free).",
-            count, #pending, math.max(room, 0))
-    end
-    if count == 0 then return end
-
-    applying = true
-    for i = 1, count do
-        -- spaced out so the server doesn't throttle the requests
-        C_Timer.After(i, function()
-            local name = pending[i].name
-            if db.ignored[name] then
-                local short = Ambiguate(name, "none")
-                if not NativeIsIgnored(short) then
-                    NativeAddIgnore(short)
-                end
-                charDB.applied[name] = true
-            end
-            if i == count then applying = false end
-        end)
-    end
-end
-
----------------------------------------------------------------------
 -- Registration
 ---------------------------------------------------------------------
 -- Newer clients moved this into ChatFrameUtil; fall back to the old global.
@@ -384,7 +335,6 @@ frame:SetScript("OnEvent", function(self, event, arg1)
         ImportVerdicts()
         --@end-alpha@
     elseif event == "PLAYER_LOGIN" then
-        C_Timer.After(10, function() ApplyNative(false) end)
         --@alpha@
         ns.ReopenDebug()   -- if it was open at logout or /reload
         --@end-alpha@
@@ -816,10 +766,6 @@ function commands.log(arg)
 end
 --@end-alpha@
 
-function commands.apply()
-    ApplyNative(true)
-end
-
 function commands.ignore(arg)
     if arg == "" then return Print("usage: /ragebuster ignore Name-Realm") end
     local name = FullName(arg)
@@ -840,7 +786,6 @@ function commands.ignore(arg)
     db.ignored[name] = record
     db.pardoned[name] = nil
     Print("ignoring %s.", name)
-    ApplyNative(false)
 end
 
 --@alpha@
@@ -881,6 +826,44 @@ end
 
 commands.unhide = commands.unignore
 
+-- Earlier versions copied blocks onto the Blizzard ignore list. This takes off
+-- every name they added on this character; names you ignored yourself stay.
+-- The game's "X is no longer being ignored." line for each is hidden meanwhile.
+local cleaning = false
+local removedPattern = ERR_IGNORE_REMOVED_S and
+    ("^" .. ERR_IGNORE_REMOVED_S:gsub("[%(%)%.%+%-%*%?%[%]%^%$]", "%%%0"):gsub("%%s", ".+") .. "$")
+
+AddFilter("CHAT_MSG_SYSTEM", function(_, _, msg)
+    if not cleaning or type(msg) ~= "string" then return false end
+    if issecretvalue and issecretvalue(msg) then return false end
+    return (removedPattern ~= nil and msg:match(removedPattern) ~= nil) or msg == ERR_IGNORE_NOT_FOUND
+end)
+
+function commands.cleanup()
+    if cleaning then return Print("already cleaning up; give it a moment.") end
+    local del = (C_FriendList and C_FriendList.DelIgnore) or DelIgnore
+    local isIgnored = (C_FriendList and C_FriendList.IsIgnored) or IsIgnored
+    local names = {}
+    for name in pairs(charDB.applied) do names[#names + 1] = name end
+    if #names == 0 or not del then
+        return Print("RageBuster hasn't added anyone to this character's Blizzard ignore list.")
+    end
+    cleaning = true
+    Print("taking %d players RageBuster added off this character's Blizzard ignore list...", #names)
+    for i, name in ipairs(names) do
+        -- spaced out so the server doesn't throttle the requests
+        C_Timer.After(i * 0.5, function()
+            local short = Ambiguate(name, "none")
+            if not isIgnored or isIgnored(short) then del(short) end
+            charDB.applied[name] = nil
+            if i == #names then
+                C_Timer.After(5, function() cleaning = false end)
+                Print("done. They're still hidden in public chat. Each character has its own ignore list, so run /rbust cleanup on your others too.")
+            end
+        end)
+    end
+end
+
 --@alpha@
 function commands.why(arg)
     if arg == "" then return Print("usage: /ragebuster why Name-Realm") end
@@ -913,7 +896,6 @@ function commands.help()
     Out("  /ragebuster status - how many players are hidden, and why")
     Out("  /ragebuster ignore Name-Realm - hide a player (your own block list)")
     Out("  /ragebuster unignore Name-Realm - show them again, including players on the RageBuster list")
-    Out("  /ragebuster apply - add your own blocks to the Blizzard ignore list")
     Out("  /ragebuster options - choose word categories and add your own words")
     --@alpha@
     Out("  /ragebuster log on|off - record blocked messages for review (test builds only)")
@@ -923,6 +905,7 @@ function commands.help()
     Out("  /ragebuster debug - open or close the window of hidden messages, with Block buttons (test builds only)")
     --@end-alpha@
     Out("  /ragebuster window - give RageBuster its own chat tab")
+    Out("  /ragebuster cleanup - take players earlier versions added off this character's Blizzard ignore list")
 end
 
 function commands.options()
