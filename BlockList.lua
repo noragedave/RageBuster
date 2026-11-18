@@ -41,9 +41,8 @@ ns.wordCategories = {
     { key = "international", name = "International figures / nationality bait", words = {
         "putin", "zelensky", "netanyahu", "trudeau", "farage", "brexit",
         "xi jinping",
-        "usa", "america", "american", "murica", "merica", "amerifat",
-        "europoor", "russia", "russian", "ukraine", "ukrainian",
-        "china", "chinese",
+        "murica", "merica", "amerifat",
+        "europoor", "russia", "russian",
     } },
     { key = "politics", name = "Generic politics", words = {
         "politics", "political", "politician", "election", "vote", "voting",
@@ -116,7 +115,7 @@ ns.wordCategories = {
         "pedophile", "pedo", "pedophilia", "paedo", "paedophile",
         "molester", "child molester", "child predator", "nonce",
         "loli", "lolicon", "shota",
-        "porn", "hentai", "onlyfans", "thot", "femboy", "furry", "furries",
+        "porn", "anal", "hentai", "onlyfans", "thot", "femboy", "furry", "furries",
         "virgin", "neckbeard", "basement dweller", "fat ass", "fatass",
         "uninstall", "delete the game", "git gud", "skill issue",
         "touch grass", "cry about it", "stay mad", "cope", "seethe",
